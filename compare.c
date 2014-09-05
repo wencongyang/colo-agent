@@ -31,6 +31,40 @@
 #include "compare_device.h"
 #include "ip_fragment.h"
 #include "ipv4_fragment.h"
+#include "compare_debugfs.h"
+
+#define DEBUG_COMPARE_MODULE
+#ifdef DEBUG_COMPARE_MODULE
+struct statistic_data {
+	unsigned long long compare_count;
+	unsigned long long total_time;
+	unsigned long long max_time;
+} statis;
+
+static struct {
+	struct dentry *compare_count_entry;
+	struct dentry *total_time_entry;
+	struct dentry *max_time_entry;
+}statis_entry;
+#endif
+
+static struct other_statistics {
+	unsigned long long m_error_packet;
+	unsigned long long s_error_packet;
+	unsigned long long protocol;
+	unsigned long long data_len;
+	unsigned long long data;
+} other_statis;
+
+static struct {
+	struct dentry *root_entry;
+	struct dentry *status_entry;
+	struct dentry *m_error_packet_entry;
+	struct dentry *s_error_packet_entry;
+	struct dentry *protocol_entry;
+	struct dentry *data_len_entry;
+	struct dentry *data_entry;
+} other_statis_entry;
 
 uint32_t state = state_comparing;
 
@@ -122,6 +156,7 @@ default_compare_packets(struct compare_info *m_cinfo,
 	if (m_cinfo->length != s_cinfo->length) {
 		pr_warn("HA_compare: the length of packet is different\n");
 		pr_warn("  protocol: %04x\n", ntohs(m_cinfo->eth->h_proto));
+		other_statis.data_len++;
 		return CHECKPOINT;
 	}
 
@@ -130,6 +165,7 @@ default_compare_packets(struct compare_info *m_cinfo,
 	if (ret & CHECKPOINT) {
 		pr_warn("HA_compare: the data is different\n");
 		pr_warn("  protocol: %04x\n", ntohs(m_cinfo->eth->h_proto));
+		other_statis.data++;
 	}
 
 	return ret;
@@ -147,11 +183,13 @@ compare_skb(struct compare_info *m_cinfo, struct compare_info *s_cinfo)
 	s_cinfo->length = s_cinfo->skb->len;
 
 	if (unlikely(m_cinfo->length < sizeof(struct ethhdr))) {
+		other_statis.m_error_packet++;
 		pr_warn("HA_compare: master packet is corrupted\n");
 		goto different;
 	}
 
 	if (unlikely(s_cinfo->length < sizeof(struct ethhdr))) {
+		other_statis.s_error_packet++;
 		pr_warn("HA_compare: slave packet is corrupted\n");
 		goto different;
 	}
@@ -165,6 +203,7 @@ compare_skb(struct compare_info *m_cinfo, struct compare_info *s_cinfo)
 			ntohs(m_cinfo->eth->h_proto));
 		pr_warn("HA_compare: slave's protocol: %d\n",
 			ntohs(s_cinfo->eth->h_proto));
+		other_statis.protocol++;
 		goto different;
 	}
 
@@ -267,6 +306,13 @@ static void compare_one_connection(struct connect_info *conn_info)
 	struct compare_info info_m, info_s;
 	struct if_connections *ics = conn_info->ics;
 	bool skip_compare_one = false;
+#ifdef DEBUG_COMPARE_MODULE
+	uint64_t last_time;
+	struct timespec start, end, delta;
+
+	getnstimeofday(&start);
+	statis.compare_count++;
+#endif
 
 	while (1) {
 		if (state != state_comparing)
@@ -335,6 +381,15 @@ static void compare_one_connection(struct connect_info *conn_info)
 			break;
 		}
 	}
+
+#ifdef DEBUG_COMPARE_MODULE
+	getnstimeofday(&end);
+	delta = timespec_sub(end, start);
+	last_time = delta.tv_sec * 1000000000 + delta.tv_nsec;
+	if (last_time > statis.max_time)
+		statis.max_time = last_time;
+	statis.total_time += last_time;
+#endif
 }
 
 static struct connect_info *get_connect_info(struct vm_connections *vmcs)
@@ -386,4 +441,96 @@ int compare_kthread(void *data)
 	}
 
 	return 0;
+}
+
+static int statistics_status_show(struct seq_file *m, void *data)
+{
+	struct other_statistics *statis = m->private;
+
+	OUTPUT_STATIS(m_error_packet);
+	OUTPUT_STATIS(s_error_packet);
+	OUTPUT_STATIS(protocol);
+	OUTPUT_STATIS(data_len);
+	OUTPUT_STATIS(data);
+	return 0;
+}
+
+static int statistics_status_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, statistics_status_show, inode->i_private);
+}
+
+static const struct file_operations statistics_status_ops = {
+	.open		= statistics_status_open,
+	.read		= seq_read,
+	.llseek		= generic_file_llseek,
+	.release	= single_release,
+};
+
+static void remove_statis_file(void)
+{
+#define REMOVE_STATIS_FILE(entry)	REMOVE_STATIS_FILE_L(statis_entry, entry)
+
+#ifdef DEBUG_COMPARE_MODULE
+	REMOVE_STATIS_FILE(compare_count_entry);
+	REMOVE_STATIS_FILE(max_time_entry);
+	REMOVE_STATIS_FILE(total_time_entry);
+#endif
+
+#undef REMOVE_STATIS_FILE
+#define REMOVE_STATIS_FILE(entry)	REMOVE_STATIS_FILE_L(other_statis_entry, entry)
+	REMOVE_STATIS_FILE(status_entry);
+	REMOVE_STATIS_FILE(m_error_packet_entry);
+	REMOVE_STATIS_FILE(s_error_packet_entry);
+	REMOVE_STATIS_FILE(protocol_entry);
+	REMOVE_STATIS_FILE(data_entry);
+	REMOVE_STATIS_FILE(data_len_entry);
+	REMOVE_STATIS_FILE(root_entry);
+}
+
+static int __init create_statis_file(void)
+{
+	int ret = 0;
+
+#ifdef DEBUG_COMPARE_MODULE
+#define CREATE_STATIS_FILE(elem)	CREATE_STATIS_FILE_L(NULL, statis, elem)
+
+	CREATE_STATIS_FILE(compare_count);
+	CREATE_STATIS_FILE(total_time);
+	CREATE_STATIS_FILE(max_time);
+#undef CREATE_STATIS_FILE
+#endif
+
+#define CREATE_STATIS_FILE(elem)	CREATE_STATIS_FILE_L(other_statis_entry.root_entry, other_statis, elem)
+
+	other_statis_entry.root_entry = colo_create_dir("other", NULL);
+	CHECK_RETURN_VALUE(other_statis_entry.root_entry);
+
+	other_statis_entry.status_entry = colo_create_file("statistics_status",
+							   &statistics_status_ops,
+							   other_statis_entry.root_entry,
+							   &other_statis);
+	CHECK_RETURN_VALUE(other_statis_entry.status_entry);
+
+	CREATE_STATIS_FILE(m_error_packet);
+	CREATE_STATIS_FILE(s_error_packet);
+	CREATE_STATIS_FILE(protocol);
+	CREATE_STATIS_FILE(data_len);
+	CREATE_STATIS_FILE(data);
+
+	return 0;
+
+err:
+	remove_statis_file();
+	return ret;
+}
+
+int __init colo_compare_init(void)
+{
+	return create_statis_file();
+}
+
+void __exit colo_compare_fini(void)
+{
+	remove_statis_file();
 }

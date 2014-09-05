@@ -25,6 +25,7 @@
 #include "ipv4_fragment.h"
 #include "connections.h"
 #include "comm.h"
+#include "compare_debugfs.h"
 
 bool ignore_id = 1;
 module_param(ignore_id, bool, 0644);
@@ -36,6 +37,35 @@ DEFINE_MUTEX(inet_ops_lock);
 /* static */
 unsigned short last_id = 0;
 unsigned int same_count = 0;
+
+/* statistics */
+static struct ipv4_statistics {
+	unsigned long long m_error_packet;
+	unsigned long long s_error_packet;
+	unsigned long long ihl;
+	unsigned long long options;
+	unsigned long long data_len;
+	unsigned long long data;
+	unsigned long long tos;
+	unsigned long long frag_off;
+	unsigned long long ttl;
+	unsigned long long id;
+} statis;
+
+static struct {
+	struct dentry *root_entry;
+	struct dentry *status_entry;
+	struct dentry *m_error_packet_entry;
+	struct dentry *s_error_packet_entry;
+	struct dentry *ihl_entry;
+	struct dentry *options_entry;
+	struct dentry *data_len_entry;
+	struct dentry *data_entry;
+	struct dentry *tos_entry;
+	struct dentry *frag_off_entry;
+	struct dentry *ttl_entry;
+	struct dentry *id_entry;
+} statis_entry;
 
 static void ipv4_update_compare_info(void *info, void *data,
 				     struct sk_buff *skb);
@@ -147,11 +177,13 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 
 	if (unlikely(m_cinfo->ip->ihl * 4 > m_cinfo->length)) {
 		pr_warn("HA_compare: master iphdr is corrupted\n");
+		statis.m_error_packet++;
 		return CHECKPOINT;
 	}
 
 	if (unlikely(s_cinfo->ip->ihl * 4 > s_cinfo->length)) {
 		pr_warn("HA_compare: slave iphdr is corrupted\n");
+		statis.s_error_packet++;
 		return CHECKPOINT;
 	}
 
@@ -165,16 +197,21 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 			pr_warn("HA_compare: slave %s: %x\n", #elem,	\
 				s_cinfo->ip->elem);			\
 			print_debuginfo(m_cinfo, s_cinfo);		\
+			UPDATE_STATIS(statis);				\
 			return CHECKPOINT | UPDATE_COMPARE_INFO;	\
 		}							\
 	} while (0)
 #define compare_elem(elem)	compare_elem_l(elem, elem)
 
 	/* version/protocol/saddr/daddr should be the same */
+#define UPDATE_STATIS(elem)
 	compare_elem(version);
 	compare_elem(protocol);
 	compare_elem(saddr);
 	compare_elem(daddr);
+
+#undef UPDATE_STATIS
+#define UPDATE_STATIS(elem)	statis.elem++
 	compare_elem(ihl);
 
 	/* IP options */
@@ -182,6 +219,7 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 		   m_cinfo->ip->ihl * 4 - 20)) {
 		pr_warn("HA_compare: iphdr option is different\n");
 		print_debuginfo(m_cinfo, s_cinfo);
+		statis.options++;
 		return CHECKPOINT | UPDATE_COMPARE_INFO;
 	}
 
@@ -221,6 +259,7 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 					m_cinfo->ip->protocol);
 				print_debuginfo(m_cinfo, s_cinfo);
 				rcu_read_unlock();
+				statis.data_len++;
 				return CHECKPOINT | UPDATE_COMPARE_INFO;
 			}
 			ret = ipv4_compare_fragment(m_cinfo, s_cinfo);
@@ -228,6 +267,7 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 				pr_warn("HA_compare: the data is different\n");
 				pr_warn("  transport protocol: %d\n",
 					m_cinfo->ip->protocol);
+				statis.data++;
 			}
 		}
 	} else {
@@ -241,6 +281,7 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 					m_cinfo->ip->protocol);
 				print_debuginfo(m_cinfo, s_cinfo);
 				rcu_read_unlock();
+				statis.data_len++;
 				return CHECKPOINT | UPDATE_COMPARE_INFO;
 			}
 			ret = default_compare_data(m_cinfo->ip_data,
@@ -250,6 +291,7 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 				pr_warn("HA_compare: the data is different\n");
 				pr_warn("  transport protocol: %d\n",
 					m_cinfo->ip->protocol);
+				statis.data++;
 			}
 		}
 	}
@@ -274,6 +316,8 @@ __ipv4_compare_packet(struct compare_info *m_cinfo, struct compare_info *s_cinfo
 	 *      shoule be the same too.
 	 */
 //	compare_elem(check);
+
+#undef compare_elem
 
 	last_id = ntohs(m_cinfo->ip->id);
 
@@ -478,13 +522,99 @@ static compare_net_ops_t ipv4_ops = {
 	.update_info = ipv4_update_compare_info,
 };
 
+static int statistics_status_show(struct seq_file *m, void *data)
+{
+	struct ipv4_statistics *statis = m->private;
+
+	OUTPUT_STATIS(m_error_packet);
+	OUTPUT_STATIS(s_error_packet);
+	OUTPUT_STATIS(ihl);
+	OUTPUT_STATIS(options);
+	OUTPUT_STATIS(tos);
+	OUTPUT_STATIS(frag_off);
+	OUTPUT_STATIS(ttl);
+	OUTPUT_STATIS(id);
+	OUTPUT_STATIS(data_len);
+	OUTPUT_STATIS(data);
+	return 0;
+}
+
+static int statistics_status_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, statistics_status_show, inode->i_private);
+}
+
+static const struct file_operations statistics_status_ops = {
+	.open		= statistics_status_open,
+	.read		= seq_read,
+	.llseek		= generic_file_llseek,
+	.release	= single_release,
+};
+
+static void remove_statis_file(void)
+{
+#define REMOVE_STATIS_FILE(entry)	REMOVE_STATIS_FILE_L(statis_entry, entry)
+
+	REMOVE_STATIS_FILE(status_entry);
+	REMOVE_STATIS_FILE(m_error_packet_entry);
+	REMOVE_STATIS_FILE(s_error_packet_entry);
+	REMOVE_STATIS_FILE(ihl_entry);
+	REMOVE_STATIS_FILE(options_entry);
+	REMOVE_STATIS_FILE(data_len_entry);
+	REMOVE_STATIS_FILE(data_entry);
+	REMOVE_STATIS_FILE(tos_entry);
+	REMOVE_STATIS_FILE(frag_off_entry);
+	REMOVE_STATIS_FILE(ttl_entry);
+	REMOVE_STATIS_FILE(id_entry);
+	REMOVE_STATIS_FILE(root_entry);
+}
+
+static int create_statis_file(void)
+{
+	int ret;
+
+	statis_entry.root_entry = colo_create_dir("ipv4", NULL);
+	CHECK_RETURN_VALUE(statis_entry.root_entry);
+
+	statis_entry.status_entry = colo_create_file("statistics_status",
+						     &statistics_status_ops,
+						     statis_entry.root_entry,
+						     &statis);
+	CHECK_RETURN_VALUE(statis_entry.status_entry);
+
+#define CREATE_STATIS_FILE(elem)	CREATE_STATIS_FILE_L(statis_entry.root_entry, statis, elem)
+	CREATE_STATIS_FILE(m_error_packet);
+	CREATE_STATIS_FILE(s_error_packet);
+	CREATE_STATIS_FILE(ihl);
+	CREATE_STATIS_FILE(options);
+	CREATE_STATIS_FILE(data_len);
+	CREATE_STATIS_FILE(data);
+	CREATE_STATIS_FILE(tos);
+	CREATE_STATIS_FILE(frag_off);
+	CREATE_STATIS_FILE(ttl);
+	CREATE_STATIS_FILE(id);
+
+	return 0;
+
+err:
+	remove_statis_file();
+	return ret;
+}
+
 static int __init compare_ipv4_init(void)
 {
-	return register_net_compare_ops(&ipv4_ops, COMPARE_IPV4);
+	int ret;
+
+	ret = register_net_compare_ops(&ipv4_ops, COMPARE_IPV4);
+	if (ret)
+		return ret;
+
+	return create_statis_file();
 }
 
 static void __exit compare_ipv4_fini(void)
 {
+	remove_statis_file();
 	unregister_net_compare_ops(&ipv4_ops, COMPARE_IPV4);
 }
 

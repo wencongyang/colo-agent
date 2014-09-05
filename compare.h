@@ -54,6 +54,9 @@ struct compare_info {
 #define		IGNORE_LEN		0x10000000
 #define		CLONED_PACKET		0x8000000
 
+extern int __init colo_compare_init(void);
+extern void __exit colo_compare_fini(void);
+
 extern uint32_t default_compare_data(void *m_data, void *s_data, int length);
 
 /*

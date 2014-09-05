@@ -20,6 +20,8 @@
 #include "ipv4_fragment.h"
 #include "connections.h"
 #include "compare_device.h"
+#include "compare_debugfs.h"
+#include "compare.h"
 
 enum {
 	TCA_COLO_UNSPEC,
@@ -185,8 +187,20 @@ static int __init colo_module_init(void)
 	if (ret)
 		goto err_dev_init;
 
+	ret = colo_debugfs_init();
+	if (ret)
+		goto err_debugfs_init;
+
+	ret = colo_compare_init();
+	if (ret)
+		goto err_compare_init;
+
 	return 0;
 
+err_compare_init:
+	colo_debugfs_fini();
+err_debugfs_init:
+	colo_dev_fini();
 err_dev_init:
 	unregister_qdisc(&colo_qdisc_ops);
 	return ret;
@@ -194,6 +208,8 @@ err_dev_init:
 
 static void __exit colo_module_exit(void)
 {
+	colo_compare_fini();
+	colo_debugfs_fini();
 	colo_dev_fini();
 	unregister_qdisc(&colo_qdisc_ops);
 }

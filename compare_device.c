@@ -24,6 +24,7 @@
 #include "compare_device.h"
 #include "ip_fragment.h"
 #include "ipv4_fragment.h"
+#include "compare_debugfs.h"
 
 #define COMP_IOC_MAGIC          'k'
 #define COMP_IOCTWAIT           _IO(COMP_IOC_MAGIC, 0)
@@ -40,6 +41,8 @@ static int expire_time;
 struct colo_vm {
 	struct vm_connections *vmcs;
 	struct task_struct *compare_thread;
+	struct dentry *status_entry;
+	char name[20];
 	int vm_idx;
 	atomic_t count;
 };
@@ -279,6 +282,8 @@ static void colo_put_vm(struct colo_vm *colo_vm)
 		put_vm_connections(colo_vm->vmcs);
 	}
 	kthread_stop(colo_vm->compare_thread);
+	if (!IS_ERR_OR_NULL(colo_vm->status_entry))
+		colo_remove_file(colo_vm->status_entry);
 	kfree(colo_vm);
 }
 
@@ -287,6 +292,7 @@ static struct colo_vm *colo_create_vm(int vm_idx)
 	struct vm_connections *vmcs = get_vm_connections(vm_idx);
 	struct colo_vm *colo_vm;
 	struct task_struct *compare_thread;
+	int ret = 0;
 
 	if (!vmcs)
 		return ERR_PTR(-EINVAL);
@@ -306,6 +312,8 @@ static struct colo_vm *colo_create_vm(int vm_idx)
 	colo_vm->vmcs = NULL;
 	colo_vm->vm_idx = vm_idx;
 	colo_vm->compare_thread = compare_thread;
+	colo_vm->status_entry = NULL;
+	snprintf(colo_vm->name, 16, "status%d", vm_idx);
 	atomic_set(&colo_vm->count, 1);
 
 	spin_lock(&vmcs->lock);
@@ -320,6 +328,16 @@ static struct colo_vm *colo_create_vm(int vm_idx)
 	vmcs->compare_data = colo_vm;
 	spin_unlock(&vmcs->lock);
 	colo_vm->vmcs = vmcs;
+
+	colo_vm->status_entry = colo_add_status_file(colo_vm->name, vmcs);
+	if (!colo_vm->status_entry)
+		ret = -ENOMEM;
+	else if (IS_ERR(colo_vm->status_entry))
+		ret = PTR_ERR(colo_vm->status_entry);
+	if (ret) {
+		colo_put_vm(colo_vm);
+		return ERR_PTR(ret);
+	}
 
 	wake_up_process(compare_thread);
 
@@ -404,7 +422,7 @@ static struct miscdevice colo_dev = {
 	&colo_chardev_fops,
 };
 
-int colo_dev_init(void)
+int __init colo_dev_init(void)
 {
 	int ret;
 
