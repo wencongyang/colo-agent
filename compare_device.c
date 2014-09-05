@@ -350,23 +350,10 @@ colo_dev_ioctl_create_vm(unsigned long arg, struct colo_vm **colo_vm_p)
 }
 
 /* colo char device */
-static int colo_dev_open(struct inode *inode, struct file *filp)
-{
-	if (!try_module_get(THIS_MODULE)) {
-		pr_notice("HA_compare: try get module failed.\n");
-		return -1;
-	}
-
-	pr_notice("HA_compare: open successfully.\n");
-	return 0;
-}
-
 static int colo_dev_release(struct inode *inode, struct file *filp)
 {
 	if (filp->private_data)
 		colo_put_vm(filp->private_data);
-	module_put(THIS_MODULE);
-	pr_notice("HA_compare: close.\n");
 
 	return 0;
 }
@@ -407,7 +394,6 @@ static long colo_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 
 struct file_operations colo_chardev_fops = {
 	.owner = THIS_MODULE,
-	.open = colo_dev_open,
 	.unlocked_ioctl = colo_dev_ioctl,
 	.release = colo_dev_release,
 };
