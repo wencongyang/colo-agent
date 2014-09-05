@@ -17,6 +17,7 @@
 #include <linux/jhash.h>
 #include <linux/ip.h>
 #include <net/ip.h>
+#include <linux/version.h>
 
 #include "comm.h"
 
@@ -34,8 +35,7 @@ struct ipv4_queue {
 //	u8		ecn; /* RFC3168 support */
 };
 
-#define NEW_KERNEL
-#ifdef NEW_KERNEL
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 9, 0)
 #define __hlist_for_each_entry(pos, head, member)	\
 	hlist_for_each_entry(pos, head, member)
 #else
